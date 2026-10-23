@@ -316,11 +316,12 @@ class GlassCheck(GlassMixin, ButtonBehavior, Widget):
 class ItemRow(GlassMixin, BoxLayout):
     badge_alpha = NumericProperty(0)
 
-    def __init__(self, text, app, **kwargs):
+    def __init__(self, text, app, boxes=1, **kwargs):
         super().__init__(orientation="vertical", size_hint_y=None,
                          height=ROW_HEIGHT, **kwargs)
         self.app = app
         self.base = text
+        self.boxes = max(1, min(3, int(boxes)))
         self.panel_open = False
         self.running = None
         self.end_time = 0
@@ -337,11 +338,14 @@ class ItemRow(GlassMixin, BoxLayout):
         self.timer_btn = IconButton("timer", radius=9, size_hint=(None, None),
                                     size=(dp(30), dp(30)), pos_hint={"center_y": 0.5})
         self.timer_btn.bind(on_release=lambda *a: self.toggle_panel())
-        self.check = GlassCheck(size_hint=(None, None), size=(dp(30), dp(30)),
-                                pos_hint={"center_y": 0.5})
         top.add_widget(self.label)
         top.add_widget(self.timer_btn)
-        top.add_widget(self.check)
+        self.checks = []
+        for _ in range(self.boxes):
+            chk = GlassCheck(size_hint=(None, None), size=(dp(30), dp(30)),
+                             pos_hint={"center_y": 0.5})
+            self.checks.append(chk)
+            top.add_widget(chk)
         self.add_widget(top)
 
         # időzítő panel (az óra gombra jelenik meg, a mentett időket mutatja)
@@ -869,6 +873,7 @@ class AddDialog(FloatLayout):
     def __init__(self, on_add, **kwargs):
         super().__init__(size_hint=(1, 1), **kwargs)
         self.on_add = on_add
+        self.boxes = 1
         with self.canvas.before:
             Color(0, 0, 0, 0.65)
             self._dim = Rectangle(pos=self.pos, size=self.size)
@@ -877,7 +882,7 @@ class AddDialog(FloatLayout):
         self.card = GlassBox(radius=24, tint=(0.16, 0.16, 0.18, 0.94),
                              border=(1, 1, 1, 0.4), orientation="vertical",
                              padding=dp(16), spacing=dp(14), size_hint=(0.88, None),
-                             height=dp(190), pos_hint={"center_x": 0.5, "top": 0.85})
+                             height=dp(262), pos_hint={"center_x": 0.5, "top": 0.85})
 
         field = GlassBox(radius=14, size_hint_y=None, height=dp(52),
                          padding=(dp(12), dp(4)))
@@ -888,6 +893,16 @@ class AddDialog(FloatLayout):
                             padding=(0, dp(11), 0, dp(11)))
         field.add_widget(self.ti)
 
+        # pipadobozok száma: 1, 2 vagy 3
+        picker = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(12))
+        self.num_btns = {}
+        for n in (1, 2, 3):
+            b = TextButton(text=str(n), font_size=sp(20), radius=14)
+            b.bind(on_release=lambda w, n=n: self.pick(n))
+            self.num_btns[n] = b
+            picker.add_widget(b)
+        self.pick(1)
+
         buttons = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(12))
         cancel = TextButton(text="Mégse")
         ok = TextButton(text="Hozzáadás", tint=(1, 1, 1, 0.26), border=(1, 1, 1, 0.8))
@@ -895,6 +910,7 @@ class AddDialog(FloatLayout):
         buttons.add_widget(ok)
 
         self.card.add_widget(field)
+        self.card.add_widget(picker)
         self.card.add_widget(buttons)
         self.add_widget(self.card)
 
@@ -907,11 +923,20 @@ class AddDialog(FloatLayout):
         self._dim.pos = self.pos
         self._dim.size = self.size
 
+    def pick(self, n):
+        self.boxes = n
+        for k, b in self.num_btns.items():
+            if k == n:
+                b.set_glass(GLASS_ON, GLASS_ON_BORDER)
+            else:
+                b.set_glass(GLASS, GLASS_BORDER)
+
     def submit(self, *args):
         text = self.ti.text.strip()
+        boxes = self.boxes
         self.close()
         if text:
-            self.on_add(text)
+            self.on_add(text, boxes)
 
     def close(self):
         self.ti.focus = False
@@ -957,8 +982,8 @@ class ChecklistApp(App):
         self.grid = GridLayout(cols=1, size_hint_y=None, spacing=dp(10),
                                padding=(dp(14), dp(6), dp(14), dp(110)))
         self.grid.bind(minimum_height=self.grid.setter("height"))
-        for text in self.load_items():
-            row = ItemRow(text, self)
+        for text, boxes in self.load_items():
+            row = ItemRow(text, self, boxes)
             self.rows.append(row)
             self.grid.add_widget(row)
         self.scroll.add_widget(self.grid)
@@ -1026,16 +1051,23 @@ class ChecklistApp(App):
             with open(self.items_path(), encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list):
-                return [str(x) for x in data]
+                out = []
+                for x in data:
+                    if isinstance(x, dict):  # új formátum
+                        out.append((str(x.get("text", "")), int(x.get("boxes", 1))))
+                    else:  # régi formátum: csak szöveg
+                        out.append((str(x), 1))
+                return out
         except Exception:
             pass
-        return list(ITEMS)
+        return [(t, 1) for t in ITEMS]
 
     def save_items(self):
         try:
             os.makedirs(self.user_data_dir, exist_ok=True)
             with open(self.items_path(), "w", encoding="utf-8") as f:
-                json.dump([r.base for r in self.rows], f, ensure_ascii=False)
+                json.dump([{"text": r.base, "boxes": r.boxes} for r in self.rows],
+                          f, ensure_ascii=False)
         except Exception:
             pass
 
@@ -1075,7 +1107,8 @@ class ChecklistApp(App):
     # ---------- Clear All ----------
     def clear_all(self, *args):
         for row in self.rows:
-            row.check.active = False
+            for chk in row.checks:
+                chk.active = False
 
     # ---------- törlés mód ----------
     def toggle_delete_mode(self, *args):
@@ -1110,8 +1143,8 @@ class ChecklistApp(App):
         self.dialog = AddDialog(self.add_item)
         self.root.add_widget(self.dialog)
 
-    def add_item(self, text):
-        row = ItemRow(text, self)
+    def add_item(self, text, boxes=1):
+        row = ItemRow(text, self, boxes)
         row.opacity = 0
         self.rows.append(row)
         self.grid.add_widget(row)  # a lista végére kerül
