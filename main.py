@@ -6,7 +6,7 @@ import time
 from kivy.animation import Animation
 from kivy.app import App
 from kivy.clock import Clock
-from kivy.graphics import Color, Line, Rectangle, RoundedRectangle
+from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle
 from kivy.graphics.texture import Texture
 from kivy.metrics import dp, sp
 from kivy.properties import BooleanProperty, NumericProperty
@@ -16,6 +16,7 @@ from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
+from kivy.uix.stencilview import StencilView
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 
@@ -31,8 +32,9 @@ ITEMS = [
     "Ötödik feladat",
 ]
 
-# Az öt időzítő másodpercben (átírhatod)
-TIMES = [10, 30, 60, 120, 300]
+# Az előre elkészített időzítők másodpercben (az appban törölhetők, újak menthetők)
+DEFAULT_PRESETS = [10, 30, 60, 120, 300]
+MAX_PRESETS = 5  # ennyi időt lehet elmenteni
 
 ROW_HEIGHT = dp(56)
 PANEL_HEIGHT = dp(52)
@@ -46,10 +48,40 @@ TEXT = (0.95, 0.95, 0.95, 1)
 
 
 def fmt(seconds):
+    """Rövid visszaszámláló felirat a listasorokhoz."""
+    seconds = int(seconds)
+    if seconds >= 3600:
+        h, r = divmod(seconds, 3600)
+        m, s = divmod(r, 60)
+        return f"{h}:{m:02d}:{s:02d}"
     if seconds >= 60:
         m, s = divmod(seconds, 60)
         return f"{m}:{s:02d}"
     return f"{seconds} mp"
+
+
+def fmt_clock(seconds):
+    """Óra-formátum a nagy körhöz."""
+    s = int(max(0, math.ceil(seconds)))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m:02d}:{sec:02d}"
+
+
+def fmt_short(seconds):
+    """Mentett idők felirata: pl. 10 mp, 2 p, 1 p 30 mp, 1 ó 5 p."""
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    parts = []
+    if h:
+        parts.append(f"{h} ó")
+    if m:
+        parts.append(f"{m} p")
+    if s or not parts:
+        parts.append(f"{s} mp")
+    return " ".join(parts)
 
 
 def vibrate():
@@ -205,6 +237,7 @@ def draw_trash(cx, cy, s, color, width):
 
 class IconButton(GlassMixin, ButtonBehavior, Widget):
     """Üveg négyzet rajzolt ikonnal ('plus', 'trash' vagy 'timer')."""
+    dot = BooleanProperty(False)  # kis pötty a sarokban (pl. fut az időzítő)
 
     def __init__(self, icon, radius=16, tint=GLASS, border=GLASS_BORDER,
                  icon_color=(1, 1, 1, 0.95), **kwargs):
@@ -212,7 +245,7 @@ class IconButton(GlassMixin, ButtonBehavior, Widget):
         self.icon = icon
         self.icon_color = icon_color
         self.init_glass(radius, tint, border)
-        self.bind(pos=self.draw_icon, size=self.draw_icon)
+        self.bind(pos=self.draw_icon, size=self.draw_icon, dot=self.draw_icon)
         self.draw_icon()
 
     def draw_icon(self, *args):
@@ -238,6 +271,9 @@ class IconButton(GlassMixin, ButtonBehavior, Widget):
                 Line(points=[cx, oy + r, cx, oy + r + m * 0.07], width=width * 1.2, cap="round")
                 Line(points=[cx - m * 0.07, oy + r + m * 0.07, cx + m * 0.07, oy + r + m * 0.07],
                      width=width * 1.2, cap="round")
+            if self.dot:
+                Color(1, 1, 1, 1)
+                Ellipse(pos=(self.right - dp(15), self.top - dp(15)), size=(dp(9), dp(9)))
 
 
 class GlassCheck(GlassMixin, ButtonBehavior, Widget):
@@ -308,13 +344,9 @@ class ItemRow(GlassMixin, BoxLayout):
         top.add_widget(self.check)
         self.add_widget(top)
 
-        # időzítő panel (az óra gombra jelenik meg)
+        # időzítő panel (az óra gombra jelenik meg, a mentett időket mutatja)
         self.panel = BoxLayout(size_hint_y=None, height=PANEL_HEIGHT, spacing=dp(6),
                                padding=(dp(10), 0, dp(10), dp(8)))
-        for secs in TIMES:
-            btn = TextButton(text=fmt(secs), radius=12, font_size=sp(14))
-            btn.bind(on_release=lambda b, s=secs: self.start_timer(s))
-            self.panel.add_widget(btn)
 
         # kis kuka a jobb felső sarokban (törlés módban látszik)
         self.bind(badge_alpha=self.draw_badge, pos=self.draw_badge, size=self.draw_badge)
@@ -369,14 +401,23 @@ class ItemRow(GlassMixin, BoxLayout):
     def toggle_panel(self):
         if self.panel_open:
             self.close_panel()
+            return
+        if not self.event:
+            self.label.text = self.base  # a régi "KÉSZ!" felirat eltűnik
+        self.panel.clear_widgets()
+        if self.app.presets:
+            for secs in self.app.presets:
+                btn = TextButton(text=fmt_short(secs), radius=12, font_size=sp(13))
+                btn.bind(on_release=lambda b, s=secs: self.start_timer(s))
+                self.panel.add_widget(btn)
         else:
-            if not self.event:
-                self.label.text = self.base  # a régi "KÉSZ!" felirat eltűnik
-            self.panel_open = True
-            self.panel.opacity = 0
-            self.add_widget(self.panel)
-            self.height = ROW_HEIGHT + PANEL_HEIGHT
-            Animation(opacity=1, duration=0.2).start(self.panel)
+            self.panel.add_widget(Label(text="Nincs mentett idő (lásd az Időzítő oldalt)",
+                                        font_size=sp(13), color=(1, 1, 1, 0.6)))
+        self.panel_open = True
+        self.panel.opacity = 0
+        self.add_widget(self.panel)
+        self.height = ROW_HEIGHT + PANEL_HEIGHT
+        Animation(opacity=1, duration=0.2).start(self.panel)
 
     def close_panel(self):
         if self.panel_open:
@@ -419,6 +460,406 @@ class ItemRow(GlassMixin, BoxLayout):
 
     def update_label(self, remaining):
         self.label.text = f"{self.base}  -  {fmt(remaining)}"
+
+
+# =================================================================
+#  GÖRGETHETŐ IDŐ-ÁLLÍTÓ KERÉK
+# =================================================================
+class Wheel(StencilView):
+    """Fel-le húzással állítható számkerék (körbeforgó, 0-tól n-1-ig)."""
+    pos_f = NumericProperty(0.0)
+    value = NumericProperty(0)
+    locked = BooleanProperty(False)
+
+    def __init__(self, n, **kwargs):
+        super().__init__(**kwargs)
+        self.n = n
+        self.item_h = dp(38)
+        self._moves = []
+        self.slots = []
+        for k in range(-3, 4):
+            lbl = Label(text="", font_size=sp(26), color=(1, 1, 1, 1),
+                        size_hint=(None, None), halign="center", valign="middle")
+            lbl.k = k
+            self.slots.append(lbl)
+            self.add_widget(lbl)
+        with self.canvas.before:
+            Color(1, 1, 1, 0.12)
+            self._bar = RoundedRectangle(radius=[dp(10)])
+        self.bind(pos=self._layout, size=self._layout, pos_f=self._on_pos)
+        self._layout()
+
+    def _layout(self, *args):
+        h = self.item_h
+        cx, cy = self.center
+        self._bar.pos = (self.x + dp(4), cy - h / 2)
+        self._bar.size = (max(0, self.width - dp(8)), h)
+        base = math.floor(self.pos_f)
+        frac = self.pos_f - base
+        for lbl in self.slots:
+            k = lbl.k
+            y = cy - (k - frac) * h
+            lbl.size = (self.width, h)
+            lbl.text_size = lbl.size
+            lbl.pos = (self.x, y - h / 2)
+            txt = f"{(base + k) % self.n:02d}"
+            if lbl.text != txt:
+                lbl.text = txt
+            dist = abs(k - frac)
+            lbl.opacity = max(0.0, 1.0 - dist / 2.4) ** 1.3
+
+    def _on_pos(self, *args):
+        self._layout()
+        v = int(round(self.pos_f)) % self.n
+        if v != self.value:
+            self.value = v
+
+    def set_value(self, v):
+        """Szépen odagörgeti a kereket a kért értékhez (a legrövidebb úton)."""
+        Animation.cancel_all(self, "pos_f")
+        cur = round(self.pos_f)
+        diff = (int(v) - cur) % self.n
+        if diff > self.n / 2:
+            diff -= self.n
+        Animation(pos_f=cur + diff, duration=0.3, t="out_cubic").start(self)
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos) and not self.locked:
+            Animation.cancel_all(self, "pos_f")
+            touch.grab(self)
+            self._moves = []
+            return True
+        return super().on_touch_down(touch)
+
+    def on_touch_move(self, touch):
+        if touch.grab_current is self:
+            self.pos_f += touch.dy / self.item_h
+            self._moves.append((time.time(), touch.dy))
+            self._moves = self._moves[-6:]
+            return True
+        return super().on_touch_move(touch)
+
+    def on_touch_up(self, touch):
+        if touch.grab_current is self:
+            touch.ungrab(self)
+            now = time.time()
+            recent = [(t, dy) for t, dy in self._moves if now - t < 0.12]
+            vel = 0.0
+            if recent:
+                span = max(now - recent[0][0], 0.03)
+                vel = sum(dy for t, dy in recent) / self.item_h / span  # kerék-lépés / mp
+                vel = max(-30.0, min(30.0, vel))
+            target = round(self.pos_f + vel * 0.25)
+            Animation(pos_f=target, duration=0.35, t="out_cubic").start(self)
+            return True
+        return super().on_touch_up(touch)
+
+
+# =================================================================
+#  KÖR (vizuális visszaszámlálás)
+# =================================================================
+class Ring(Widget):
+    fraction = NumericProperty(1.0)  # 1 = teljes kör, 0 = lejárt
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.main = Label(text="01:00", font_size=sp(46), bold=True, color=(1, 1, 1, 1),
+                          size_hint=(None, None))
+        self.sub = Label(text="Beállított idő", font_size=sp(14), color=(1, 1, 1, 0.65),
+                         size_hint=(None, None))
+        for lbl in (self.main, self.sub):
+            lbl.bind(texture_size=lambda w, ts: setattr(w, "size", ts))
+            lbl.bind(size=self._place)
+            self.add_widget(lbl)
+        self.bind(pos=self._redraw, size=self._redraw, fraction=self._redraw)
+
+    def _place(self, *args):
+        cx, cy = self.center
+        d = min(self.width, self.height)
+        self.main.center = (cx, cy + dp(8))
+        self.sub.center = (cx, cy - d * 0.17)
+
+    def _redraw(self, *args):
+        self.canvas.before.clear()
+        d = min(self.width, self.height) - dp(24)
+        if d <= 0:
+            return
+        cx, cy = self.center
+        lw = max(dp(6), d * 0.045)
+        r = d / 2 - lw / 2
+        f = self.fraction
+        with self.canvas.before:
+            Color(1, 1, 1, 0.12)
+            Line(circle=(cx, cy, r), width=lw)
+            if f > 0.002:
+                Color(1, 1, 1, 0.95)
+                if f >= 0.998:
+                    Line(circle=(cx, cy, r), width=lw)
+                else:
+                    Line(circle=(cx, cy, r, 360 * (1 - f), 360), width=lw, cap="round")
+        self.main.font_size = max(sp(28), min(sp(52), d * 0.20))
+        self._place()
+
+
+# =================================================================
+#  MENTETT IDŐ GOMB
+# =================================================================
+class PresetChip(GlassMixin, ButtonBehavior, Label):
+    def __init__(self, secs, page, **kwargs):
+        super().__init__(text=fmt_short(secs), font_size=sp(15), color=TEXT, **kwargs)
+        self.secs = secs
+        self.edit = False
+        self.init_glass(12)
+        self.bind(on_release=lambda *a: page.chip_pressed(secs))
+        self.bind(pos=self.draw_x, size=self.draw_x)
+
+    def set_edit(self, flag):
+        self.edit = flag
+        if flag:
+            self.set_glass(GLASS_ON, GLASS_ON_BORDER)
+        else:
+            self.set_glass(GLASS, GLASS_BORDER)
+        self.draw_x()
+
+    def draw_x(self, *args):
+        self.canvas.after.clear()
+        if not self.edit:
+            return
+        s = dp(5)
+        cx = self.right - dp(15)
+        cy = self.center_y
+        with self.canvas.after:
+            Color(1, 1, 1, 0.95)
+            Line(points=[cx - s, cy - s, cx + s, cy + s], width=dp(1.4), cap="round")
+            Line(points=[cx - s, cy + s, cx + s, cy - s], width=dp(1.4), cap="round")
+
+
+# =================================================================
+#  IDŐZÍTŐ OLDAL
+# =================================================================
+class TimerPage(BoxLayout):
+    def __init__(self, app, **kwargs):
+        super().__init__(orientation="vertical", **kwargs)
+        self.app = app
+        self.state = "idle"  # idle / running / paused / done
+        self.total = 60
+        self.remaining = 60
+        self.end_time = 0.0
+        self.event = None
+        self.edit_mode = False
+        self._flash_ev = None
+
+        # fejléc
+        bar = BoxLayout(size_hint_y=None, height=dp(70),
+                        padding=(dp(18), dp(12), dp(14), dp(10)))
+        title = Label(text="Időzítő", font_size=sp(26), bold=True, color=TEXT,
+                      halign="left", valign="middle")
+        title.bind(size=lambda w, s: setattr(w, "text_size", s))
+        bar.add_widget(title)
+        self.add_widget(bar)
+
+        body = BoxLayout(orientation="vertical", spacing=dp(10),
+                         padding=(dp(16), 0, dp(16), 0))
+
+        # kör
+        self.ring = Ring()
+        body.add_widget(self.ring)
+
+        # görgethető idő-állító (óra : perc : mp)
+        pick = GlassBox(radius=20, orientation="horizontal", size_hint_y=None,
+                        height=dp(150), padding=dp(8), spacing=dp(4))
+        self.wh = Wheel(24)
+        self.wm = Wheel(60)
+        self.ws = Wheel(60)
+        for wheel, unit in ((self.wh, "óra"), (self.wm, "perc"), (self.ws, "mp")):
+            col = BoxLayout(orientation="vertical")
+            col.add_widget(wheel)
+            col.add_widget(Label(text=unit, size_hint_y=None, height=dp(20),
+                                 font_size=sp(13), color=(1, 1, 1, 0.6)))
+            pick.add_widget(col)
+        body.add_widget(pick)
+
+        # mentett idők
+        block = BoxLayout(orientation="vertical", size_hint_y=None,
+                          height=dp(142), spacing=dp(6))
+        head = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+        heading = Label(text="Mentett idők", halign="left", valign="middle",
+                        font_size=sp(15), color=(1, 1, 1, 0.75))
+        heading.bind(size=lambda w, s: setattr(w, "text_size", s))
+        save_btn = TextButton(text="Mentés", radius=10, font_size=sp(14),
+                              size_hint=(None, 1), width=dp(84))
+        save_btn.bind(on_release=self.save_current)
+        self.edit_btn = TextButton(text="Szerk.", radius=10, font_size=sp(14),
+                                   size_hint=(None, 1), width=dp(84))
+        self.edit_btn.bind(on_release=self.toggle_edit)
+        head.add_widget(heading)
+        head.add_widget(save_btn)
+        head.add_widget(self.edit_btn)
+        block.add_widget(head)
+        self.chips = GridLayout(cols=3, size_hint_y=None, height=dp(96), spacing=dp(8),
+                                row_default_height=dp(44), row_force_default=True)
+        block.add_widget(self.chips)
+        body.add_widget(block)
+        self.add_widget(body)
+
+        # alsó sor: Indítás / Nullázás (jobbra a váltó gomb helye marad)
+        ctrl = BoxLayout(size_hint_y=None, height=dp(88), spacing=dp(12),
+                         padding=(dp(16), dp(16), dp(96), dp(16)))
+        self.start_btn = TextButton(text="Indítás", font_size=sp(17),
+                                    tint=(1, 1, 1, 0.26), border=(1, 1, 1, 0.8))
+        self.start_btn.bind(on_release=self.toggle_run)
+        reset_btn = TextButton(text="Nullázás", font_size=sp(16))
+        reset_btn.bind(on_release=self.reset)
+        ctrl.add_widget(self.start_btn)
+        ctrl.add_widget(reset_btn)
+        self.add_widget(ctrl)
+
+        # kezdőérték: 1 perc
+        self.wm.pos_f = 1
+        self.wh.bind(value=self.on_wheel)
+        self.wm.bind(value=self.on_wheel)
+        self.ws.bind(value=self.on_wheel)
+        self.rebuild_chips()
+        self.on_wheel()
+        self.set_state("idle")
+
+    # ---------- kerekek ----------
+    def wheel_seconds(self):
+        return int(self.wh.value) * 3600 + int(self.wm.value) * 60 + int(self.ws.value)
+
+    def set_wheels(self, secs):
+        h, rem = divmod(int(secs), 3600)
+        m, s = divmod(rem, 60)
+        self.wh.set_value(min(h, 23))
+        self.wm.set_value(m)
+        self.ws.set_value(s)
+
+    def on_wheel(self, *args):
+        if self.state in ("idle", "done"):
+            if self.state == "done":
+                self.state = "idle"
+                self.refresh_sub()
+            self.total = self.wheel_seconds()
+            self.remaining = self.total
+            self.ring.fraction = 1.0
+            self.ring.main.text = fmt_clock(self.total)
+
+    # ---------- állapot ----------
+    def refresh_sub(self):
+        self.ring.sub.text = {"idle": "Beállított idő", "running": "Fut",
+                              "paused": "Szünet", "done": "Letelt"}[self.state]
+
+    def flash(self, msg):
+        self.ring.sub.text = msg
+        if self._flash_ev:
+            self._flash_ev.cancel()
+        self._flash_ev = Clock.schedule_once(lambda dt: self.refresh_sub(), 2.2)
+
+    def set_state(self, st):
+        self.state = st
+        locked = st in ("running", "paused")
+        for w in (self.wh, self.wm, self.ws):
+            w.locked = locked
+            Animation(opacity=0.4 if locked else 1, duration=0.2).start(w)
+        self.start_btn.text = {"idle": "Indítás", "running": "Szünet",
+                               "paused": "Folytatás", "done": "Indítás"}[st]
+        self.refresh_sub()
+        self.app.update_timer_dot()
+
+    # ---------- vezérlés ----------
+    def toggle_run(self, *args):
+        if self.state == "running":
+            self.pause()
+        elif self.state == "paused":
+            self.resume()
+        else:
+            secs = self.wheel_seconds()
+            if secs <= 0:
+                self.flash("Állíts be időt!")
+                return
+            self.start(secs)
+
+    def cancel_event(self):
+        if self.event:
+            self.event.cancel()
+            self.event = None
+
+    def start(self, secs):
+        self.cancel_event()
+        self.total = secs
+        self.remaining = secs
+        self.end_time = time.time() + secs
+        self.set_state("running")
+        self.event = Clock.schedule_interval(self.tick, 1 / 30.0)
+        self.tick(0)
+
+    def pause(self):
+        self.remaining = max(0.0, self.end_time - time.time())
+        self.cancel_event()
+        self.set_state("paused")
+
+    def resume(self):
+        self.end_time = time.time() + self.remaining
+        self.event = Clock.schedule_interval(self.tick, 1 / 30.0)
+        self.set_state("running")
+
+    def reset(self, *args):
+        self.cancel_event()
+        self.set_state("idle")
+        self.on_wheel()
+
+    def tick(self, dt):
+        self.remaining = self.end_time - time.time()
+        if self.remaining <= 0:
+            self.finish()
+            return False
+        self.ring.fraction = self.remaining / self.total
+        self.ring.main.text = fmt_clock(self.remaining)
+
+    def finish(self):
+        self.cancel_event()
+        self.remaining = 0
+        self.ring.fraction = 0
+        self.ring.main.text = "KÉSZ!"
+        self.set_state("done")
+        vibrate()
+
+    # ---------- mentett idők ----------
+    def rebuild_chips(self):
+        self.chips.clear_widgets()
+        for secs in self.app.presets:
+            chip = PresetChip(secs, self)
+            chip.set_edit(self.edit_mode)
+            self.chips.add_widget(chip)
+
+    def chip_pressed(self, secs):
+        if self.edit_mode:
+            self.app.remove_preset(secs)
+            self.rebuild_chips()
+        else:
+            self.set_wheels(secs)
+            self.start(secs)
+
+    def save_current(self, *args):
+        secs = self.wheel_seconds()
+        if secs <= 0:
+            self.flash("Állíts be időt!")
+        elif secs in self.app.presets:
+            self.flash("Ez az idő már mentve van")
+        elif len(self.app.presets) >= MAX_PRESETS:
+            self.flash(f"Legfeljebb {MAX_PRESETS} idő menthető, törölj egyet")
+        else:
+            self.app.add_preset(secs)
+            self.rebuild_chips()
+            self.flash("Elmentve")
+
+    def toggle_edit(self, *args):
+        self.edit_mode = not self.edit_mode
+        self.edit_btn.text = "Kész" if self.edit_mode else "Szerk."
+        for chip in self.chips.children:
+            chip.set_edit(self.edit_mode)
+        if self.edit_mode:
+            self.flash("Koppints egy időre a törléshez")
 
 
 # =================================================================
@@ -493,12 +934,13 @@ class ChecklistApp(App):
         self.delete_mode = False
         self.rows = []
         self.dialog = None
+        self.on_timer_page = False
+        self.presets = self.load_presets()
 
         root = Background()
 
-        main = BoxLayout(orientation="vertical")
-
-        # felső sáv: cím + Clear All
+        # --- Listám oldal ---
+        self.list_page = BoxLayout(orientation="vertical")
         bar = BoxLayout(size_hint_y=None, height=dp(70),
                         padding=(dp(18), dp(12), dp(14), dp(10)), spacing=dp(10))
         title = Label(text="Listám", font_size=sp(26), bold=True, color=TEXT,
@@ -509,9 +951,8 @@ class ChecklistApp(App):
         clear_btn.bind(on_release=self.clear_all)
         bar.add_widget(title)
         bar.add_widget(clear_btn)
-        main.add_widget(bar)
+        self.list_page.add_widget(bar)
 
-        # görgethető lista
         self.scroll = ScrollView(do_scroll_x=False)
         self.grid = GridLayout(cols=1, size_hint_y=None, spacing=dp(10),
                                padding=(dp(14), dp(6), dp(14), dp(110)))
@@ -521,25 +962,62 @@ class ChecklistApp(App):
             self.rows.append(row)
             self.grid.add_widget(row)
         self.scroll.add_widget(self.grid)
-        main.add_widget(self.scroll)
-        root.add_widget(main)
+        self.list_page.add_widget(self.scroll)
 
-        # jobb alsó sarok: kuka + plusz
+        # --- Időzítő oldal ---
+        self.timer_page = TimerPage(self)
+
+        # az éppen látható oldal
+        self.page_box = BoxLayout()
+        self.page_box.add_widget(self.list_page)
+        root.add_widget(self.page_box)
+
+        # jobb alsó sarok: plusz, kuka, időzítő
         bottom = BoxLayout(size_hint=(None, None),
-                           size=(dp(2 * 56 + 12 + 32), dp(56 + 32)),
+                           size=(dp(3 * 56 + 2 * 12 + 32), dp(56 + 32)),
                            padding=dp(16), spacing=dp(12),
                            pos_hint={"right": 1, "y": 0})
+        self.plus_btn = IconButton("plus")
+        self.plus_btn.bind(on_release=self.open_add)
         self.trash_btn = IconButton("trash")
         self.trash_btn.bind(on_release=self.toggle_delete_mode)
-        plus_btn = IconButton("plus")
-        plus_btn.bind(on_release=self.open_add)
+        self.timer_btn = IconButton("timer")
+        self.timer_btn.bind(on_release=self.toggle_timer_page)
+        bottom.add_widget(self.plus_btn)
         bottom.add_widget(self.trash_btn)
-        bottom.add_widget(plus_btn)
+        bottom.add_widget(self.timer_btn)
         root.add_widget(bottom)
 
+        self.update_timer_dot()
         return root
 
-    # ---------- mentés ----------
+    # ---------- oldalváltás ----------
+    def toggle_timer_page(self, *args):
+        if self.delete_mode:
+            self.set_delete_mode(False)
+        if self.dialog is not None and self.dialog.parent:
+            self.dialog.close()
+        self.on_timer_page = not self.on_timer_page
+        page = self.timer_page if self.on_timer_page else self.list_page
+        self.page_box.clear_widgets()
+        page.opacity = 0
+        self.page_box.add_widget(page)
+        Animation(opacity=1, duration=0.2).start(page)
+        for b in (self.plus_btn, self.trash_btn):
+            b.opacity = 0 if self.on_timer_page else 1
+            b.disabled = self.on_timer_page
+        if self.on_timer_page:
+            self.timer_btn.set_glass(GLASS_ON, GLASS_ON_BORDER)
+        else:
+            self.timer_btn.set_glass(GLASS, GLASS_BORDER)
+
+    def update_timer_dot(self):
+        page = getattr(self, "timer_page", None)
+        btn = getattr(self, "timer_btn", None)
+        if page is not None and btn is not None:
+            btn.dot = page.state in ("running", "paused")
+
+    # ---------- mentés: lista ----------
     def items_path(self):
         return os.path.join(self.user_data_dir, "items.json")
 
@@ -560,6 +1038,39 @@ class ChecklistApp(App):
                 json.dump([r.base for r in self.rows], f, ensure_ascii=False)
         except Exception:
             pass
+
+    # ---------- mentés: időzítők ----------
+    def presets_path(self):
+        return os.path.join(self.user_data_dir, "presets.json")
+
+    def load_presets(self):
+        try:
+            with open(self.presets_path(), encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                vals = [int(x) for x in data if int(x) > 0]
+                return vals[:MAX_PRESETS]
+        except Exception:
+            pass
+        return list(DEFAULT_PRESETS)
+
+    def save_presets(self):
+        try:
+            os.makedirs(self.user_data_dir, exist_ok=True)
+            with open(self.presets_path(), "w", encoding="utf-8") as f:
+                json.dump(self.presets, f)
+        except Exception:
+            pass
+
+    def add_preset(self, secs):
+        if secs > 0 and secs not in self.presets and len(self.presets) < MAX_PRESETS:
+            self.presets.append(int(secs))
+            self.save_presets()
+
+    def remove_preset(self, secs):
+        if secs in self.presets:
+            self.presets.remove(secs)
+            self.save_presets()
 
     # ---------- Clear All ----------
     def clear_all(self, *args):
